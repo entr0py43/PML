@@ -1,0 +1,127 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Neil L"
+date: "February 15, 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+##Introduction
+Human Activity Recognition has emerged as a key research area in recent years. It has many potential applications: tracking steps/exercise (ie fitbit), evaluating sleep habits, infant or elderly monitoring, etc. Many uses have focused on the question "how much" of something is being done, but few have asked "how well" is something being done. This project aims to do just that. The dataset contains information on 6 subjects were asked to perform barbell lifts correctly and incorrectly, while wearing accelerometers on the belt, forearm, arm, and dumbell. **Our goal is to train a predictive classifier on this dataset to output "how well" a person is performing an exercise.**
+  
+The outcome variable is labelled "classe," which consists of 5 categories.  They are a "correct" execution, exactly according to the specification (Class A), or one of four common mistakes in the execution of the exercise:  throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).  More information on this dataset can be found [here](http://groupware.les.inf.puc-rio.br/har).  
+  
+This report briefly describes my evaluation of the dataset and how I approached building a predictive model, including cross validation steps and expected errors, and attempts to explain my rationale.  The model described herein correctly predicted all 20 test cases.  
+  
+##Exploratory Data Analysis
+For the sake of evaluation, I will include all relevant code.  The following commands load package dependcies, then downloads and imports the dataset. Note that several native strings were converted to NAs.  
+```{r readin}
+library(tidyverse); library(caret)
+url_train<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+url_test<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+if (!file.exists("~/pml-training.csv")){
+      #proceeds with download if absent
+      download.file(url_train, destfile = "~/pml-training.csv")}
+if (!file.exists("~/pml-testing.csv")){
+      download.file(url_test, destfile = "~/pml-testing.csv")}
+finalTest<-read.csv("~/pml-testing.csv", stringsAsFactors = T, 
+                    header = T,  na.strings = c("NA","","#DIV/0!"))
+training<- read.csv("~/pml-training.csv", stringsAsFactors = T, 
+                    header = T, na.strings = c("NA","","#DIV/0!"))
+```
+The first observation was that many columns contain mostly NA values, which is a problem for most predictive models. The simplest way to address this is to simply exclude them.  Since there are ~160 variables in the original dataset, there are many variables left after exclusion to use for predictive modeling.  However, I did circle back later to evaluate whether the location of non-NA values in those columns revealed anything about the outcome of interest (see appendix).  
+
+The following code removes NA columns, as well as non-predictive variables such as subject ID and timestamps. Note that for columns with NA values - there were either zero NAs, or many (hence this code removes ALL columns with any NAs).  If there were simply a few missing values, I would have chosen to use kNN imputation on those missing values.  
+```{r fewer}
+numNA<-colSums(is.na(training))
+logicNA<- numNA < 1
+fewer<-training[logicNA] #removing columns with NAs
+fewer<-fewer[,-(1:7)] #further removing descriptive vars, not expected to have predictive value
+dim(fewer) #19622 obs x 53 variables
+```
+NOTE that is was very important to exclude the `num_window` and `X` variables from the training dataset, because the entire dataset was sorted by the outcome variable from A to E.  Including one of these sequentially numbered variables was sufficient for 100% accuracy with a decision tree model (see appendix).
+
+##Model Selection
+###Comparison of Models
+Following the structure of the lectures and quizzes, I further partitioned the training data (70% training, 30% testing), and fit 3 models with the expectation that I would later create an ensemble model.  The 3 models were:  a SVM (support vector machine, using the e1071 package), a random forest classifier (method="rf"), and a gradient boosted tree model (method="gbm" in caret's train function).  To review this code, scroll down to the Appendix.  The random forest model performed the best, and predicted the test data (30% of the training data provided) with remarkable accuracy = 99.2%.  The gbm model performed similarly well, but the SVM model only reached ~94% accuracy.  
+
+###Model Refinement
+I wanted to attempt to improve on this, and chose to refine the RF model, using the k-fold cross validation strategy.  Since we have a separate test set we are attempting to predict, the idea was also to retrain the model on the entire training dataset, for maximum possible accuracy approaching the testing predictions (the 20 unlabelled observations we were graded on).  I did this by setting the 'trainControl' parameters, and re-training the model on all the observations in the training dataset (now named 'fewer' which has 52 predictive variables, and the outcome variable 'class').  
+```{r model, cache=TRUE}
+kten<-trainControl(method="cv", number=10, savePredictions = TRUE)
+kten_rf<-train(classe ~ ., method="rf", trControl = kten, data=fewer)
+kten_rf$finalModel
+```
+  
+###Model Validation and Performance Optimization
+The random forest model 'kten_rf' implemented above is trained on all of the relevant columns of the training dataset, using a k-fold cross validation strategy with k=10.  It performs extremely well, however after some reading I discovered that repeatedly performing the k-fold cross validation strategy created more stable/more optimized parameters, further eliminating some of the variance of the model.  After attempting a 50x 10-fold repeated CV training, I terminated the process before completion after running ~18 hours on my PC.  I re-tried with a 5-fold CV repeated 10 times, using the train control function in the following code chunk: (which completed in a more reasonable amount of time, ~2 hours)
+```{r validate, cache=TRUE}
+fiver<-trainControl(method="repeatedcv", number=5, repeats=10)
+k5by10<-train(classe ~., method="rf", trControl=fiver, data=fewer)
+k5by10$finalModel
+```
+Indeed, the out of bag error decreased, albeit a small amount, from 0.46% to 0.43%.  As you can see from the output, only 2 correctly-performed curls (class A) were mis-identified as class B or E, out of nearly 20,000 observations in the training dataset.  I chose not to implement an ensemble of multiple methods, as this degree of accuracy was sufficient in my judgement. As stated previous, it also correctly predicted the class of all 20 observations in the test dataset.   
+  
+  
+###Final Thoughts
+It was a bit surprising that this model performs as well as it does.  The structure of the problem contains a time-domain element in that each execution of a bicep curl takes place over the course of several seconds.  My understanding of the dataset is that each row represents an instantaneous 'snapshot' across the four sensors.  The number of observations is not consistent with any kind of grouping, given that it was created from 6 subjects performing 10 repetitions of 5 exercises (instead there seems to be ~60 observations per repetition).  Also, we do not have access to metadata further describing the variables - individual repetitions or portions of the movement are likely related to the 'num_window' variable, but its not clear what those 864 windows signify.  I see no reason that a dumbbell curl that stops halfway (class C) would differ from a correctly performed dumbbell curl (class A) in the first second or so of execution - assuming the form is otherwise correct. 
+
+##Appendix
+###The Initial 3 Models
+The following shows the code for the 3 inital models, which were trained on 70% of the training dataset, and evaluated on the other 30%.  The models are a support vector machine, a random forest classifier, and gradient boosted tree model. 
+```{r initialModels, eval=FALSE}
+#support vector machine -- 93.7% accuracy
+library(e1071)
+mod_svm<-svm(classe ~ ., data=train, scale=T)
+predSVM<-predict(mod_svm, test)
+confusionMatrix(predSVM, test$classe)
+
+#random forest -- accuracy 99.2% 
+mod_rf<-train(classe ~ ., method="rf", data=train)
+predRF<-predict(mod_rf, test)
+confusionMatrix(predRF, test$classe)
+
+#stochastic gradient boosting -- accuracy 99.2%
+mod_gbm<-train(classe ~ ., method="gbm", data=train, verbose=F)
+predGBM<-predict(mod_rf, test)
+confusionMatrix(predGBM, test$classe)
+```
+While the gradient boosted trees model performed identically to the random forest, I chose to further refine the random forest model (in part because I felt I understood the model a bit better).  
+  
+###Further Exploration of NA columns
+After the first pass at building the models without the NA columns, I decided to investigate if they contained information which might suggest which class they belonged to.  I utilized some dplyr functions and created a visualization of a handful of variables, using variations of the following code:
+```{r exploreNA, fig.width=9}
+wtf<- training %>%
+      filter(!is.na(max_roll_forearm)) %>%
+      select(classe, max_roll_forearm, X:num_window)
+
+ggplot(wtf, aes(wtf$max_roll_forearm))+ geom_histogram(bins=15) + facet_grid(~factor(classe))
+```
+  
+They did not appear to be reveal any further information about which class the observations belonged to, so that line of inquiry was dropped.  
+
+###Traps
+The training dataset was sorted by the outcome variable, and as such any increasing numerical variable (`X` or `num_window`) was sufficient to train a tree model to 100% accuracy.  See the code below (not executed)
+```{r trap, eval=FALSE}
+trap<-training[c(7,160)] #one predictor 'num_window' and the outcome 'classe'
+names(trap)
+trapRF<-train(classe~num_window, method="rf", data=trap)
+predTrap<-predict(trapRF, trap)
+confusionMatrix(predTrap, trap$classe) #100% accuracy
+# Reference
+# Prediction    A    B    C    D    E
+# A 5580    0    0    0    0
+# B    0 3797    0    0    0
+# C    0    0 3422    0    0
+# D    0    0    0 3216    0
+# E    0    0    0    0 3607
+```
+  
+  
+`sessionInfo()`
+R version 3.4.3 (2017-11-30)  
+Platform: x86_64-w64-mingw32/x64 (64-bit)  
+Running under: Windows 7 x64 (build 7601) Service Pack 1  
